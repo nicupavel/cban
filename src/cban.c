@@ -30,11 +30,12 @@ TODO:
 #include <limits.h>
 #include <errno.h>
 
-#define VERSION "0.1.8-0"
+#define VERSION "0.1.9-0"
 #define PROCFILE "/proc/net/dev"
 #define UPDATE_INTERVAL 1
 #define DEBUG(x) if ( debug >= 1 ) x;
 #define DEBUG2(x) if ( debug >= 2 ) x;
+#define MAX_INTERFACES 255
 #define BUFFER 255
 #define RX_POS 1
 #define TX_POS 9
@@ -47,10 +48,17 @@ static int format_type=0; // 0 - mrtg , 1-rrdtool
 FILE *f;
 struct statistics 
 {
-	unsigned long long incoming, outgoing;
+	char ifname[255];
+	unsigned long long	last_incomming,
+				last_outgoing,
+				incoming,
+				outgoing,
+				delta;
 };
 
-void parse (char **input);
+struct statistics interfaces[MAX_INTERFACES];
+
+void strstrip(char **input);
 void monitor_interface();
 
 void help ()
@@ -61,47 +69,38 @@ void help ()
 	printf ("\t-h : print available options.\n");
 	printf ("\t-m : output in a suitable form for MRTG.\n");
 	printf ("\t-r <rrd_filename> : output in a suitable form for RRDTOOL.\n");
-	printf ("\t-d : debug level 0 - none 1 - verbose 2 - near everything \n\t- default 0.\n");
-	printf ("\t-i <interface> : select interface to monitor.\n");
+	printf ("\t-d : debug level 0 - none 1 - verbose 2 - nearly everything \n\t- default 0.\n");
+	printf ("\t-i <interface> : output only this interface\n");
 	printf ("\t-u <update interval>: specifies (in seconds) the delay between updates - default 1s.\n");
 	printf ("\t-b : print statistics in bits rather then in bytes.\n");
 	printf ("\t-k : print statistics in kilo.\n");
 }
 
-int process_data (struct statistics *stat )
+int open_proc_file ()
 {
-	char buffer[ BUFFER ], *current, *temporary, *token;
-	int location, errno;
+    f = fopen (PROCFILE,"r");
+    if (f == NULL)
+    {
+	if (use_format && format_type){
+	    printf ("U:U\n");
+	    return 0;
+	} else {
+	    fprintf (stderr,"error:unable to open %s for reading.\n", PROCFILE);
+	    return 0;
+	}
+    }
+    DEBUG (printf ("debug:opened %s at %p.\n",PROCFILE, f));
+    return 1;
+}
+
+int parse_proc_line(struct statistics *stat, char *line)
+{
+	char *token;
 	unsigned long long val = 0;
 
-	
-	// current pointer address is buffer address
-	current = buffer;
-	memset(buffer, 0, BUFFER );
-	
-	// skip 2 lines
-	current = fgets(buffer, BUFFER, f);
-	current = fgets(buffer, BUFFER, f);
-	
-	while(fgets(buffer, BUFFER, f))
-	{
-		buffer[strlen(buffer)-1] = 0;
-		DEBUG2(printf ("proc line:%s\n",current));
-		parse( &current );
-		DEBUG2(printf ("parsed line:%s\n",current));
-		// there is a space there so removeit.
-		temporary = current + 1; 
-		//DEBUG2(printf ("debug:%s\n",temporary));
-		if( !strncmp( temporary, interface, strlen(interface)))
-		{
-			DEBUG2(printf ("debug:interface not matching skipping.\n"));
-			break;
-		}
-	} 
-	// first delimiter after the interface
-	current = strchr( temporary, ':' )+1;
-	temporary = current;
-	location = 0;
+	char *temporary = line;
+	int location = 0, ret;
+
 	while( temporary )
 	{
 		errno = 0;
@@ -110,7 +109,7 @@ int process_data (struct statistics *stat )
 		token = strsep( &temporary, " " );
 		if( !*token )
 			continue;
-		// now the token points to a number not a space
+		//now the token points to a number not a space
 		location++;
 		if (location == RX_POS || location == TX_POS)
 		{
@@ -134,12 +133,52 @@ int process_data (struct statistics *stat )
 			    break;
 		    }
 		}
-
 	}
+}
+
+int process_data (struct statistics *stat )
+{
+	char buffer[ BUFFER ], *current, *temporary;
+	int location, errno, found = 0, intf_len;
+
+	if(!open_proc_file())
+		return 0;
+
+	intf_len = strlen(interface);
+
+	// current pointer address is buffer address
+	current = buffer;
+	memset(buffer, 0, BUFFER );
+
+	// skip 2 lines
+	temporary = fgets(buffer, BUFFER, f);
+	temporary = fgets(buffer, BUFFER, f);
 	
+	while(fgets(buffer, BUFFER, f))
+	{
+		buffer[strlen(buffer) - 1] = 0;
+		strstrip(&current);
+		if(strncmp(current, interface, intf_len) == 0)
+		{
+			found = 1;
+			break;
+		} else {
+			DEBUG2(printf("Non matching line: %s\n", current));
+		}
+	} 
+
+	if (!found) 
+	{
+	    printf("Cannot find interface %s in %s\n", interface, PROCFILE);
+	    return 0;
+	}
+
+	current = strchr( temporary, ':' ) + 1; // first delimiter after the interface
+	parse_proc_line(stat, current);
+
 	fclose(f);
 	DEBUG(printf ("debug:closed %s at %p.\n", PROCFILE, f));
-	return open_proc_file();
+	return 1;
 }
 
 void monitor_interface()
@@ -155,21 +194,21 @@ void monitor_interface()
 		printf ("update %s N:",rrd_filename);
 	}
 	 
-	if( process_data(&previous))
+	if(!process_data(&previous))
 	{
 	    if (use_format && format_type){
 		printf ("U:U\n");
 		exit (1);
 	    } else {
-		fprintf( stderr, "problems in process_data function.\n" );
+		fprintf( stderr, "Problem in process_data function.\n" );
 		exit(1);
 	    }
 	}
 
 	if (! use_format) {
 	    
-	    printf("%cc",27);              // reset terminal
-	    printf("%c[2J",27);            // clear screeen
+	    //printf("%cc",27);              // reset terminal
+	    //printf("%c[2J",27);            // clear screeen
 	    
 	    while(1)
 	    {
@@ -187,7 +226,7 @@ void monitor_interface()
 		    outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
 
 
-		printf("%c[H",27); // use escape to put the cursor up
+		//printf("%c[H",27); // use escape to put the cursor up
 		
 		printf( "incoming %s%s/sec: %llu outgoing %s%s/sec: %llu                \n",
 			kilo, units, incoming*bits/divisor, 
@@ -223,7 +262,7 @@ void monitor_interface()
 	}
 }
 
-void parse( char **in )
+void strstrip( char **in )
 {  
 	char *string;
 	int remove, gotspace;
@@ -258,22 +297,6 @@ void parse( char **in )
 	}
 }
 
-int open_proc_file ()
-{
-    f = fopen (PROCFILE,"r");
-    if (f == NULL)
-    {
-	if (use_format && format_type){
-	    printf ("U:U\n");
-	    return 1;
-	} else {
-	    fprintf (stderr,"error:unable to open %s for reading.\n", PROCFILE);
-	    return 1;
-	}
-    }
-    DEBUG (printf ("debug:opened %s at %p.\n",PROCFILE, f));
-    return 0;
-}
 
 int main ( int argc, char *argv[] )
 {
@@ -304,7 +327,7 @@ int main ( int argc, char *argv[] )
 			break;	
 		case 'i':
 			interface = strdup (optarg);
-			DEBUG(printf ("Interface: %s\n",interface));
+			DEBUG(printf("Using interface: %s\n",interface));
 			break;
 		case 'm':
 			use_format = 1;
@@ -320,9 +343,12 @@ int main ( int argc, char *argv[] )
 	}
 	if ( !interface ) 
 	{
-		printf ("error: you must specify a interface.\nexample: %s -i eth0.\n",argv[0]);
+		printf ("error: you must specify an interface.\nexample: %s -i eth0.\n",argv[0]);
 		return 0;
+	} else {
+	    printf("Using interface: %s\n", interface);
 	}
+
 	if ( use_format && format_type && !rrd_filename )
 	{
 		printf ("error: you must specify what file to update when using rrdtool option.\n");
@@ -332,10 +358,6 @@ int main ( int argc, char *argv[] )
 	{
 		DEBUG (printf ("warning: using default update interval at %d seconds.\n",UPDATE_INTERVAL));
 		update = UPDATE_INTERVAL;
-	}
-	if ( open_proc_file () ) 
-	{
-		return 1;
 	}
 	// so let's begin.
 	monitor_interface();

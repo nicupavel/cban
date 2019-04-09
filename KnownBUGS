@@ -1,0 +1,4 @@
+
+1. output in kilo (in console mode)
+   is not exact -- fix: do not divide use strigs with .
+

@@ -1,0 +1,38 @@
+
+5-11-2001 - version 0.1.8
+	-- added more samples in rrdtool directory
+	-- changed the datebase creation
+
+3-11-2001 - version 0.1.7
+	-- changed rrdtool output values now it writes total 
+	   bytes
+
+4-10-2001 - version 0.1.6
+
+	-- added rrd tool support (-r switch); 
+	-- documentation
+	
+4-10-2001 - version 0.1.4-2
+    
+    -- added some escape codes to fix up(vt100) and clear screen 	
+    
+2-10-2001 - version 0.1.4
+
+    -- added somekind of MRTG support ( -m switch) 
+    -- added a sample mrtg config file (in etc dir)    
+
+1-10-2001 - version 0.1.3
+
+    -- added escape code to put the cursor on the
+       first line
+    -- changed from atol to strtoul - bug when numbers
+       wore bigger then long.
+    -- fixed conversion from proc
+
+
+30-09-2001 - version 0.1.0
+    
+    -- first version.
+
+
+    

@@ -27,6 +27,8 @@ TODO:
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <limits.h>
+#include <errno.h>
 
 #define VERSION "0.1.8-0"
 #define PROCFILE "/proc/net/dev"
@@ -34,16 +36,18 @@ TODO:
 #define DEBUG(x) if ( debug >= 1 ) x;
 #define DEBUG2(x) if ( debug >= 2 ) x;
 #define BUFFER 255
+#define RX_POS 1
+#define TX_POS 9
 
 char *interface,*units="bytes",*kilo="",*rrd_filename;
 static int update,debug=0,bits=1,divisor=1;
 static int use_format=0; // not for console
 static int format_type=0; // 0 - mrtg , 1-rrdtool
 
-FILE *fd;
+FILE *f;
 struct statistics 
 {
-	unsigned long  incoming,outgoing;
+	unsigned long long incoming, outgoing;
 };
 
 void parse (char **input);
@@ -67,24 +71,27 @@ void help ()
 int process_data (struct statistics *stat )
 {
 	char buffer[ BUFFER ], *current, *temporary, *token;
-	int location;
+	int location, errno;
+	unsigned long long val = 0;
+
 	
 	// current pointer address is buffer address
 	current = buffer;
-	memset( buffer, 0, BUFFER );
+	memset(buffer, 0, BUFFER );
 	
-	fgets( buffer, BUFFER, fd );
-	fgets( buffer, BUFFER, fd );
+	// skip 2 lines
+	current = fgets(buffer, BUFFER, f);
+	current = fgets(buffer, BUFFER, f);
 	
-	while( fgets( buffer, BUFFER, fd ) )
+	while(fgets(buffer, BUFFER, f))
 	{
 		buffer[strlen(buffer)-1] = 0;
-		DEBUG2(printf ("debug:%s\n",current));
+		DEBUG2(printf ("proc line:%s\n",current));
 		parse( &current );
-		DEBUG2(printf ("debug:%s\n",current));
+		DEBUG2(printf ("parsed line:%s\n",current));
 		// there is a space there so removeit.
 		temporary = current + 1; 
-		DEBUG2(printf ("debug:%s\n",temporary));
+		//DEBUG2(printf ("debug:%s\n",temporary));
 		if( !strncmp( temporary, interface, strlen(interface)))
 		{
 			DEBUG2(printf ("debug:interface not matching skipping.\n"));
@@ -97,33 +104,48 @@ int process_data (struct statistics *stat )
 	location = 0;
 	while( temporary )
 	{
+		errno = 0;
+		val = 0;
 		//extract space from the temporary buffer
 		token = strsep( &temporary, " " );
 		if( !*token )
 			continue;
 		// now the token points to a number not a space
 		location++;
-		if( location == 1 ) 
+		if (location == RX_POS || location == TX_POS)
 		{
-			stat->incoming = strtoul(token,NULL,10);
-			continue;
+		    val = strtoull(token,NULL,10);
+		    if ((errno == ERANGE && (val == ULONG_MAX || val < 0)) || (errno != 0 && val == 0)) {
+			   perror("strtol");
+			   DEBUG(printf("Error converting value %s\n", token));
+			   stat->incoming = 0;
+			   stat->outgoing = 0;
+			   break;
+		    }
+
+		    if( location == RX_POS)
+		    {
+			    stat->incoming = val;
+			    continue;
+		    }
+		    if( location == TX_POS)
+		    {
+			    stat->outgoing = val;
+			    break;
+		    }
 		}
-		if( location == 9 )
-		{
-			stat->outgoing = strtoul(token,NULL,10);
-			break;
-		}
+
 	}
 	
-	fclose(fd);
-	DEBUG(printf ("debug:closed %s at %x.\n",PROCFILE,fd));
+	fclose(f);
+	DEBUG(printf ("debug:closed %s at %p.\n", PROCFILE, f));
 	return open_proc_file();
 }
 
 void monitor_interface()
 {
 	struct statistics previous,current;
-	unsigned long  incoming, outgoing;
+	unsigned long long  incoming, outgoing;
 	
 	// if we are using format for rrdtool
 	// we must do this before everithig starts
@@ -153,22 +175,30 @@ void monitor_interface()
 	    {
 		sleep(update);
 		process_data(&current);
-		incoming = (current.incoming - previous.incoming) / update * 1000 / 1024;
-		outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
-		
+
+		if (current.incoming < previous.incoming)
+		    incoming = 0;
+		else
+		    incoming = (current.incoming - previous.incoming) / update * 1000 / 1024;
+
+		if (current.outgoing < previous.outgoing)
+		    outgoing = 0;
+		else
+		    outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
+
+
 		printf("%c[H",27); // use escape to put the cursor up
 		
-		printf( "incoming %s%s/sec: %lu outgoing %s%s/sec: %lu                \n", 
+		printf( "incoming %s%s/sec: %llu outgoing %s%s/sec: %llu                \n",
 			kilo, units, incoming*bits/divisor, 
 			kilo, units, outgoing*bits/divisor );
 			
-		DEBUG2 (printf( "total incoming %s%s: %lu total outgoing %s%s: %lu\n",
-			kilo, units, previous.incoming*bits/divisor, 
-			kilo, units, previous.outgoing*bits/divisor ));
+		DEBUG2(printf( "previous: incoming counter: %llu outgoing counter: %llu\n",
+			previous.incoming, previous.outgoing));
 			
-		DEBUG (printf( "total incoming %s%s: %lu total outgoing %s%s: %lu\n", 
-			kilo, units, current.incoming*bits/divisor, 
-			kilo, units, current.outgoing*bits/divisor ));
+		DEBUG(printf( "current: incoming counter: %llu outgoing counter: %llu\n",
+			current.incoming, current.outgoing));
+
 		
 		memcpy(&previous,&current,sizeof(struct statistics)); // let's save current data
 	    }
@@ -176,22 +206,20 @@ void monitor_interface()
 	// just output one set of values for mrtg or rrdtool.
 	// rrdtool use total number of bytes in/out.
 	else {
-    	    if (format_type)
+	    if (format_type)
 	    {	
 		// rrdtool
-		printf( "%lu:%lu\n", 
+		printf( "%llu:%llu\n",
 		previous.incoming*bits/divisor, 
 		previous.outgoing*bits/divisor );
-		} else {
-		    //mrtg
-	    	    sleep(update);
-		    process_data(&current);
-		    incoming = (current.incoming - previous.incoming) / update * 1000 / 1024;
-		    outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
-		    printf( "%lu\n%lu\n", 
-		    incoming*bits/divisor, 
-		    outgoing*bits/divisor );
-		}	
+	    } else {
+		//mrtg
+		sleep(update);
+		process_data(&current);
+		incoming = (current.incoming - previous.incoming) / update * 1000 / 1024;
+		outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
+		printf( "%llu\n%llu\n", incoming*bits/divisor, outgoing*bits/divisor );
+	    }
 	}
 }
 
@@ -232,8 +260,8 @@ void parse( char **in )
 
 int open_proc_file ()
 {
-    fd = fopen (PROCFILE,"r");
-    if (fd == NULL)
+    f = fopen (PROCFILE,"r");
+    if (f == NULL)
     {
 	if (use_format && format_type){
 	    printf ("U:U\n");
@@ -243,7 +271,7 @@ int open_proc_file ()
 	    return 1;
 	}
     }
-    DEBUG (printf ("debug:opened %s at %x.\n",PROCFILE,fd));
+    DEBUG (printf ("debug:opened %s at %p.\n",PROCFILE, f));
     return 0;
 }
 

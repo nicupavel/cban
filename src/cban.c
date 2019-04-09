@@ -35,7 +35,7 @@ TODO:
 #define UPDATE_INTERVAL 1
 #define DEBUG(x) if ( debug >= 1 ) x;
 #define DEBUG2(x) if ( debug >= 2 ) x;
-#define MAX_INTERFACES 255
+#define MAX_INTERFACES 20
 #define BUFFER 255
 #define RX_POS 1
 #define TX_POS 9
@@ -48,17 +48,17 @@ static int format_type=0; // 0 - mrtg , 1-rrdtool
 FILE *f;
 struct statistics 
 {
+	int processed;
 	char ifname[255];
-	unsigned long long	last_incomming,
+	unsigned long long	last_incoming,
 				last_outgoing,
 				incoming,
 				outgoing,
-				delta;
+				delta_incoming,
+				delta_outgoing;
 };
 
 struct statistics interfaces[MAX_INTERFACES];
-
-void strstrip(char **input);
 void monitor_interface();
 
 void help ()
@@ -67,6 +67,7 @@ void help ()
 	printf ("Version: %s\n",VERSION);
 	printf ("Usage:\n");
 	printf ("\t-h : print available options.\n");
+	printf ("\t-c : console auto clear.\n");
 	printf ("\t-m : output in a suitable form for MRTG.\n");
 	printf ("\t-r <rrd_filename> : output in a suitable form for RRDTOOL.\n");
 	printf ("\t-d : debug level 0 - none 1 - verbose 2 - nearly everything \n\t- default 0.\n");
@@ -93,58 +94,42 @@ int open_proc_file ()
     return 1;
 }
 
-int parse_proc_line(struct statistics *stat, char *line)
+void cban_save_current(struct statistics *stat) 
 {
-	char *token;
-	unsigned long long val = 0;
-
-	char *temporary = line;
-	int location = 0, ret;
-
-	while( temporary )
-	{
-		errno = 0;
-		val = 0;
-		//extract space from the temporary buffer
-		token = strsep( &temporary, " " );
-		if( !*token )
-			continue;
-		//now the token points to a number not a space
-		location++;
-		if (location == RX_POS || location == TX_POS)
-		{
-		    val = strtoull(token,NULL,10);
-		    if ((errno == ERANGE && (val == ULONG_MAX || val < 0)) || (errno != 0 && val == 0)) {
-			   perror("strtol");
-			   DEBUG(printf("Error converting value %s\n", token));
-			   stat->incoming = 0;
-			   stat->outgoing = 0;
-			   break;
-		    }
-
-		    if( location == RX_POS)
-		    {
-			    stat->incoming = val;
-			    continue;
-		    }
-		    if( location == TX_POS)
-		    {
-			    stat->outgoing = val;
-			    break;
-		    }
-		}
-	}
+    stat->last_incoming = stat->incoming;
+    stat->last_outgoing = stat->outgoing;
 }
 
-int process_data (struct statistics *stat )
+void cban_compute_delta(struct statistics *stat)
 {
-	char buffer[ BUFFER ], *current, *temporary;
-	int location, errno, found = 0, intf_len;
+	if (stat->incoming < stat->last_incoming)
+		stat->delta_incoming = 0;
+	else
+		stat->delta_incoming = (stat->incoming - stat->last_incoming) / update * 1000 / 1024;
+
+	if (stat->outgoing < stat->last_outgoing)
+		stat->delta_outgoing = 0;
+	else
+		stat->delta_outgoing = (stat->outgoing - stat->last_outgoing) / update * 1000 / 1024;
+}
+
+void cban_print(struct statistics *stat)
+{
+	printf( "%s: incoming %s%s/sec: %llu outgoing %s%s/sec: %llu                \n",
+		stat->ifname,
+		kilo, units, stat->delta_incoming*bits/divisor, 
+		kilo, units, stat->delta_outgoing*bits/divisor );
+
+}
+
+
+int parse_proc_net_dev(void)
+{
+	char buffer[BUFFER], *current, *temporary;
+	int  ret, intf_idx = 0;
 
 	if(!open_proc_file())
 		return 0;
-
-	intf_len = strlen(interface);
 
 	// current pointer address is buffer address
 	current = buffer;
@@ -156,34 +141,33 @@ int process_data (struct statistics *stat )
 	
 	while(fgets(buffer, BUFFER, f))
 	{
-		buffer[strlen(buffer) - 1] = 0;
-		strstrip(&current);
-		if(strncmp(current, interface, intf_len) == 0)
-		{
-			found = 1;
+		struct statistics *stat = &interfaces[intf_idx];
+		stat->processed = 0;
+
+		ret = sscanf(current, "%[^:]: %llu %*u %*u %*u %*u %*u %*u %*u %llu %*u",
+			stat->ifname, &stat->incoming, &stat->outgoing);
+
+		if (ret < 3) 
+			printf("not all params converted %d!\n", ret);
+		else
+			stat->processed = 1;
+
+		//printf("Interface: %s, incoming: %llu, outgoing: %llu\n", stat.ifname, stat.incoming, stat.outgoing);
+		intf_idx++;
+		if (intf_idx >= MAX_INTERFACES)
 			break;
-		} else {
-			DEBUG2(printf("Non matching line: %s\n", current));
-		}
 	} 
-
-	if (!found) 
-	{
-	    printf("Cannot find interface %s in %s\n", interface, PROCFILE);
-	    return 0;
-	}
-
-	current = strchr( temporary, ':' ) + 1; // first delimiter after the interface
-	parse_proc_line(stat, current);
 
 	fclose(f);
 	DEBUG(printf ("debug:closed %s at %p.\n", PROCFILE, f));
 	return 1;
 }
 
+
+
 void monitor_interface()
 {
-	struct statistics previous,current;
+	int i;
 	unsigned long long  incoming, outgoing;
 	
 	// if we are using format for rrdtool
@@ -193,107 +177,74 @@ void monitor_interface()
 	if (use_format && format_type){
 		printf ("update %s N:",rrd_filename);
 	}
-	 
-	if(!process_data(&previous))
+	
+	// initial state
+	if(!parse_proc_net_dev())
 	{
 	    if (use_format && format_type){
 		printf ("U:U\n");
-		exit (1);
+		exit(1);
 	    } else {
-		fprintf( stderr, "Problem in process_data function.\n" );
+		fprintf( stderr, "Error in parse_proc_net_dev() function.\n" );
 		exit(1);
 	    }
 	}
 
+
 	if (! use_format) {
-	    
-	    //printf("%cc",27);              // reset terminal
-	    //printf("%c[2J",27);            // clear screeen
+	    if (format_type == 3) {
+		printf("%cc",27);              // reset terminal
+		printf("%c[2J",27);            // clear screeen
+	    }
+
+	    for(i = 0; i < MAX_INTERFACES; i++) 
+	    {
+		struct statistics *stat = &interfaces[i];
+		if (!stat->processed) continue;
+		cban_save_current(stat);
+	    }
 	    
 	    while(1)
 	    {
+		
 		sleep(update);
-		process_data(&current);
+		parse_proc_net_dev();
 
-		if (current.incoming < previous.incoming)
-		    incoming = 0;
-		else
-		    incoming = (current.incoming - previous.incoming) / update * 1000 / 1024;
+		if (format_type == 3)
+			printf("%c[H",27); // use escape to put the cursor up
 
-		if (current.outgoing < previous.outgoing)
-		    outgoing = 0;
-		else
-		    outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
-
-
-		//printf("%c[H",27); // use escape to put the cursor up
-		
-		printf( "incoming %s%s/sec: %llu outgoing %s%s/sec: %llu                \n",
-			kilo, units, incoming*bits/divisor, 
-			kilo, units, outgoing*bits/divisor );
-			
-		DEBUG2(printf( "previous: incoming counter: %llu outgoing counter: %llu\n",
-			previous.incoming, previous.outgoing));
-			
-		DEBUG(printf( "current: incoming counter: %llu outgoing counter: %llu\n",
-			current.incoming, current.outgoing));
-
-		
-		memcpy(&previous,&current,sizeof(struct statistics)); // let's save current data
+		for(i = 0; i < MAX_INTERFACES; i++) 
+		{
+		    struct statistics *stat = &interfaces[i];
+		    if (!stat->processed) { 
+			continue;
+		    }
+		    cban_compute_delta(stat);
+		    cban_save_current(stat);
+		    cban_print(stat);
+		}
 	    }
 	}
 	// just output one set of values for mrtg or rrdtool.
 	// rrdtool use total number of bytes in/out.
 	else {
 	    if (format_type)
-	    {	
+	    {/*	
 		// rrdtool
 		printf( "%llu:%llu\n",
 		previous.incoming*bits/divisor, 
 		previous.outgoing*bits/divisor );
+	    */
 	    } else {
 		//mrtg
 		sleep(update);
-		process_data(&current);
+		parse_proc_net_dev();
+		/*
 		incoming = (current.incoming - previous.incoming) / update * 1000 / 1024;
 		outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
 		printf( "%llu\n%llu\n", incoming*bits/divisor, outgoing*bits/divisor );
+		*/
 	    }
-	}
-}
-
-void strstrip( char **in )
-{  
-	char *string;
-	int remove, gotspace;
-	
-	string = *in;
-	remove = 1;
-	gotspace = 0;
-	while( *string ) {
-		switch( *string ) {
-		case ' ':
-		case '\t':
-			if( remove ) {
-				if( gotspace ) {
-					strcpy( string, string+1 );
-				} else {
-					gotspace = 1;
-					string++;
-				} 
-			} else {
-				string++;
-			}
-			break;
-		case '"':
-			if( *(string-1) != '\\' )
-				remove = ! remove;
-			string++;
-			break;
-		default:
-			gotspace = 0;
-			string++;
-		}
 	}
 }
 
@@ -302,7 +253,7 @@ int main ( int argc, char *argv[] )
 {
 	int option;
 	
-	while (( option = getopt ( argc, argv, "hbkd:i:u:mr:")) != -1 )
+	while (( option = getopt ( argc, argv, "hbkcd:i:u:mr:")) != -1 )
 	{
 		switch (option) 
 		{
@@ -333,6 +284,9 @@ int main ( int argc, char *argv[] )
 			use_format = 1;
 			format_type = 0;
 			debug = 0;
+			break;
+		case 'c':
+			format_type = 3;
 			break;
 		case 'r':
 			use_format = 1;

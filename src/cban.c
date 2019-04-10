@@ -33,29 +33,33 @@ TODO:
 #define VERSION "0.1.9-0"
 #define PROCFILE "/proc/net/dev"
 #define UPDATE_INTERVAL 1
-#define DEBUG(x) if ( debug >= 1 ) x;
-#define DEBUG2(x) if ( debug >= 2 ) x;
+#define DEBUG(fmt, ...) do { if (debug >= 1) fprintf(stderr, fmt, __VA_ARGS__);} while(0)
+#define TRACE(fmt, ...) do { if (debug >= 2) fprintf(stderr, fmt, __VA_ARGS__);} while(0)
 #define MAX_INTERFACES 20
 #define BUFFER 255
 #define RX_POS 1
 #define TX_POS 9
 
-char *interface,*units="bytes",*kilo="",*rrd_filename;
+char *interface = NULL;
+char *units="bytes";
+char *kilo="";
+char *rrd_filename;
+
 static int update,debug=0,bits=1,divisor=1;
-static int use_format=0; // not for console
-static int format_type=0; // 0 - mrtg , 1-rrdtool
+typedef enum {MRTG, RRDTOOL, CONSOLE_CLEAR, PLAIN} output_format_t;
+static output_format_t output_format = PLAIN;
 
 FILE *f;
 struct statistics 
 {
 	int processed;
 	char ifname[255];
-	unsigned long long	last_incoming,
-				last_outgoing,
-				incoming,
-				outgoing,
-				delta_incoming,
-				delta_outgoing;
+	unsigned long long  last_incoming;
+	unsigned long long  last_outgoing;
+	unsigned long long  incoming;
+	unsigned long long  outgoing;
+	unsigned long long  delta_incoming;
+	unsigned long long  delta_outgoing;
 };
 
 struct statistics interfaces[MAX_INTERFACES];
@@ -67,7 +71,7 @@ void help ()
 	printf ("Version: %s\n",VERSION);
 	printf ("Usage:\n");
 	printf ("\t-h : print available options.\n");
-	printf ("\t-c : console auto clear.\n");
+	printf ("\t-c : console auto clear output.\n");
 	printf ("\t-m : output in a suitable form for MRTG.\n");
 	printf ("\t-r <rrd_filename> : output in a suitable form for RRDTOOL.\n");
 	printf ("\t-d : debug level 0 - none 1 - verbose 2 - nearly everything \n\t- default 0.\n");
@@ -82,15 +86,15 @@ int open_proc_file ()
     f = fopen (PROCFILE,"r");
     if (f == NULL)
     {
-	if (use_format && format_type){
+	if (output_format == RRDTOOL){
 	    printf ("U:U\n");
 	    return 0;
-	} else {
-	    fprintf (stderr,"error:unable to open %s for reading.\n", PROCFILE);
-	    return 0;
 	}
+
+	fprintf (stderr,"error:unable to open %s for reading.\n", PROCFILE);
+	return 0;
     }
-    DEBUG (printf ("debug:opened %s at %p.\n",PROCFILE, f));
+    DEBUG("opened %s at %p.\n",PROCFILE, f);
     return 1;
 }
 
@@ -159,7 +163,7 @@ int parse_proc_net_dev(void)
 	} 
 
 	fclose(f);
-	DEBUG(printf ("debug:closed %s at %p.\n", PROCFILE, f));
+	DEBUG("closed %s at %p.\n", PROCFILE, f);
 	return 1;
 }
 
@@ -174,25 +178,24 @@ void monitor_interface()
 	// we must do this before everithig starts
 	// so in a case of error we fail ok.
 	// (we are piped with rrdtool)
-	if (use_format && format_type){
-		printf ("update %s N:",rrd_filename);
+	if (output_format == RRDTOOL){
+		printf ("update %s N:", rrd_filename);
 	}
 	
 	// initial state
 	if(!parse_proc_net_dev())
 	{
-	    if (use_format && format_type){
-		printf ("U:U\n");
-		exit(1);
+	    if (output_format == RRDTOOL){
+		printf ("U:U\n");		
 	    } else {
 		fprintf( stderr, "Error in parse_proc_net_dev() function.\n" );
-		exit(1);
 	    }
+	    exit(1);
 	}
 
 
-	if (! use_format) {
-	    if (format_type == 3) {
+	if (output_format > RRDTOOL) {
+	    if (output_format == CONSOLE_CLEAR) {
 		printf("%cc",27);              // reset terminal
 		printf("%c[2J",27);            // clear screeen
 	    }
@@ -206,11 +209,10 @@ void monitor_interface()
 	    
 	    while(1)
 	    {
-		
 		sleep(update);
 		parse_proc_net_dev();
 
-		if (format_type == 3)
+		if (output_format == CONSOLE_CLEAR)
 			printf("%c[H",27); // use escape to put the cursor up
 
 		for(i = 0; i < MAX_INTERFACES; i++) 
@@ -228,22 +230,17 @@ void monitor_interface()
 	// just output one set of values for mrtg or rrdtool.
 	// rrdtool use total number of bytes in/out.
 	else {
-	    if (format_type)
-	    {/*	
-		// rrdtool
-		printf( "%llu:%llu\n",
-		previous.incoming*bits/divisor, 
-		previous.outgoing*bits/divisor );
-	    */
+	    if (output_format == RRDTOOL)
+	    {
+//		printf( "%llu:%llu\n",
+//		previous.incoming*bits/divisor,
+//		previous.outgoing*bits/divisor );
 	    } else {
-		//mrtg
-		sleep(update);
-		parse_proc_net_dev();
-		/*
-		incoming = (current.incoming - previous.incoming) / update * 1000 / 1024;
-		outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
-		printf( "%llu\n%llu\n", incoming*bits/divisor, outgoing*bits/divisor );
-		*/
+//		sleep(update);
+//		parse_proc_net_dev();
+//		incoming = (current.incoming - previous.incoming) / update * 1000 / 1024;
+//		outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
+//		printf( "%llu\n%llu\n", incoming*bits/divisor, outgoing*bits/divisor );
 	    }
 	}
 }
@@ -262,11 +259,11 @@ int main ( int argc, char *argv[] )
 			return 0;
 		case 'd':
 			debug = atoi (optarg);
-			DEBUG(printf ("debug: debug level: %d\n",debug));
+			DEBUG("debug level: %d\n",debug);
 			break;
 		case 'u':
 			update = atoi (optarg);
-			DEBUG (printf ("Updating every %d seconds.\n",update));
+			DEBUG("Updating every %d seconds.\n",update);
 			break;
 		case 'b':
 			bits = 8;
@@ -278,41 +275,40 @@ int main ( int argc, char *argv[] )
 			break;	
 		case 'i':
 			interface = strdup (optarg);
-			DEBUG(printf("Using interface: %s\n",interface));
+			DEBUG("Using interface: %s\n", interface);
 			break;
 		case 'm':
-			use_format = 1;
-			format_type = 0;
+			output_format = MRTG;
 			debug = 0;
 			break;
 		case 'c':
-			format_type = 3;
+			output_format = CONSOLE_CLEAR;
 			break;
 		case 'r':
-			use_format = 1;
-			format_type = 1;
-			rrd_filename = strdup (optarg);
+			output_format = RRDTOOL;
+			rrd_filename = strdup(optarg);
 			debug = 0;
 		}
-	}
-	if ( !interface ) 
+	}	
+	if (output_format == RRDTOOL)
 	{
-		printf ("error: you must specify an interface.\nexample: %s -i eth0.\n",argv[0]);
-		return 0;
-	} else {
-	    printf("Using interface: %s\n", interface);
-	}
+	    if (!rrd_filename) {
+		fprintf(stderr, "error: you must specify what file to update when using rrdtool option.\n");
+		return 2;
+	    }
 
-	if ( use_format && format_type && !rrd_filename )
-	{
-		printf ("error: you must specify what file to update when using rrdtool option.\n");
-		return 0;
+	    if (!interface) {
+		fprintf(stderr, "error: you must specify an interface when using rrdtool output mode.\n");
+		return 3;
+	    }
+
 	}
 	if ( !update ) 
 	{
-		DEBUG (printf ("warning: using default update interval at %d seconds.\n",UPDATE_INTERVAL));
+		DEBUG("warning: using default update interval at %d seconds.\n",UPDATE_INTERVAL);
 		update = UPDATE_INTERVAL;
 	}
+
 	// so let's begin.
 	monitor_interface();
 }

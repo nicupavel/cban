@@ -36,6 +36,7 @@ TODO:
 #define DEBUG(fmt, ...) do { if (debug >= 1) fprintf(stderr, fmt, __VA_ARGS__);} while(0)
 #define TRACE(fmt, ...) do { if (debug >= 2) fprintf(stderr, fmt, __VA_ARGS__);} while(0)
 #define MAX_INTERFACES 20
+#define MAX_DATA_POINTS 3600
 #define BUFFER 255
 #define RX_POS 1
 #define TX_POS 9
@@ -48,11 +49,15 @@ char *rrd_filename;
 static int update,debug=0,bits=1,divisor=1;
 typedef enum {MRTG, RRDTOOL, CONSOLE_CLEAR, PLAIN} output_format_t;
 static output_format_t output_format = PLAIN;
+typedef enum {INCOMING, OUTGOING } data_type_t;
 
 FILE *f;
 struct statistics {
 	int processed;
 	char ifname[255];
+	unsigned long long  incoming_list[MAX_DATA_POINTS];
+	unsigned long long  outgoing_list[MAX_DATA_POINTS];
+	unsigned long long  data_counter;
 	unsigned long long  last_incoming;
 	unsigned long long  last_outgoing;
 	unsigned long long  incoming;
@@ -96,6 +101,63 @@ int open_proc_file ()
 	return 1;
 }
 
+unsigned long long *cban_get_data_by_type(struct statistics *stat, data_type_t type) {
+    if (type == INCOMING)
+	return stat->incoming_list;
+
+    return stat->outgoing_list;
+}
+
+void cban_add_current(struct statistics *stat, unsigned long long incoming, unsigned long long outgoing)
+{
+    unsigned long long current_idx;
+    stat->data_counter++;
+    current_idx = stat->data_counter % MAX_DATA_POINTS;
+    stat->incoming_list[current_idx] = incoming;
+    stat->outgoing_list[current_idx] = outgoing;
+}
+
+unsigned long long * cban_get_last_entries(struct statistics *stat, int nr_entries, data_type_t type)
+{
+    unsigned long long *entries = NULL;
+    unsigned long long *data = NULL;
+    int entries_idx = 0, current_idx, i;
+
+    if (nr_entries >= MAX_DATA_POINTS) return NULL;
+
+    entries = (unsigned long long *) malloc(sizeof(unsigned long long) * nr_entries + 1);
+    if (!entries) return NULL;
+
+    current_idx = stat->data_counter % MAX_DATA_POINTS;
+
+    data = cban_get_data_by_type(stat, type);
+
+    for (i = current_idx - 1; i >= 0 && entries_idx < nr_entries; i--, entries_idx++) {
+	entries[entries_idx] = data[i];
+    }
+
+    for (i = MAX_DATA_POINTS - 1 ; i > current_idx - 1 && entries_idx < nr_entries; i--,entries_idx++) {
+	entries[entries_idx] = data[i];
+    }
+
+    return entries;
+}
+
+unsigned long long cban_get_current(struct statistics *stat, data_type_t type) {
+    int current_idx = stat->data_counter % MAX_DATA_POINTS;
+    unsigned long long *data = cban_get_data_by_type(stat, type);
+    return data[current_idx];
+}
+
+unsigned long long cban_get_last(struct statistics *stat, int seconds, data_type_t type) {
+    int current_idx = stat->data_counter % MAX_DATA_POINTS;
+    int last_idx = MAX_DATA_POINTS - (seconds - current_idx);
+
+    unsigned long long *data = cban_get_data_by_type(stat, type);
+
+    return data[last_idx];
+}
+
 void cban_save_current(struct statistics *stat)
 {
 	stat->last_incoming = stat->incoming;
@@ -123,7 +185,6 @@ void cban_print(struct statistics *stat)
 		kilo, units, stat->delta_outgoing*bits/divisor );
 
 }
-
 
 int parse_proc_net_dev(void)
 {
@@ -164,8 +225,6 @@ int parse_proc_net_dev(void)
 	return 1;
 }
 
-
-
 void monitor_interface()
 {
 	int i;
@@ -188,7 +247,6 @@ void monitor_interface()
 		}
 		exit(1);
 	}
-
 
 	if (output_format > RRDTOOL) {
 		if (output_format == CONSOLE_CLEAR) {

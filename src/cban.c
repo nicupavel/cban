@@ -52,12 +52,6 @@ struct statistics {
     unsigned long long  incoming_list[MAX_DATA_POINTS];
     unsigned long long  outgoing_list[MAX_DATA_POINTS];
     unsigned long long  data_counter;
-    unsigned long long  last_incoming;
-    unsigned long long  last_outgoing;
-    unsigned long long  incoming;
-    unsigned long long  outgoing;
-    unsigned long long  delta_incoming;
-    unsigned long long  delta_outgoing;
 };
 
 struct statistics interfaces[MAX_INTERFACES];
@@ -91,7 +85,7 @@ int open_proc_file ()
         fprintf (stderr,"error:unable to open %s for reading.\n", PROCFILE);
         return 0;
     }
-    DEBUG("opened %s at %p.\n",PROCFILE, f);
+    TRACE("*opened %s at %p.\n",PROCFILE, f);
     return 1;
 }
 
@@ -109,11 +103,10 @@ unsigned long long *cban_get_data_by_type(struct statistics *stat, data_type_t t
 void cban_add_current(struct statistics *stat, unsigned long long incoming, unsigned long long outgoing)
 {
     int current_idx;
-
-    stat->data_counter++;
     current_idx = stat->data_counter % MAX_DATA_POINTS;
     stat->incoming_list[current_idx] = incoming;
     stat->outgoing_list[current_idx] = outgoing;
+    stat->data_counter++;
     TRACE("%s: [%d] incoming: %llu outgoing: %llu\n", stat->ifname, current_idx, stat->incoming_list[current_idx], stat->outgoing_list[current_idx]);
 }
 
@@ -145,7 +138,10 @@ unsigned long long * cban_get_last_entries(struct statistics *stat, int nr_entri
 
 unsigned long long cban_get_current(struct statistics *stat, data_type_t type)
 {
-    int current_idx = stat->data_counter % MAX_DATA_POINTS;
+    int start_idx = stat->data_counter % MAX_DATA_POINTS;
+    int current_idx = start_idx - 1;
+    if (current_idx < 0) current_idx = MAX_DATA_POINTS - 1;
+
     unsigned long long *data = cban_get_data_by_type(stat, type);
     TRACE("Type: %d [%d] Current: %llu\n", type, current_idx, data[current_idx]);
     return data[current_idx];
@@ -153,20 +149,16 @@ unsigned long long cban_get_current(struct statistics *stat, data_type_t type)
 
 unsigned long long cban_get_last(struct statistics *stat, int seconds, data_type_t type)
 {
-    int current_idx = stat->data_counter % MAX_DATA_POINTS;
-    int last_idx = MAX_DATA_POINTS - (seconds - current_idx);
+    int start_idx = stat->data_counter % MAX_DATA_POINTS;
+    int last_idx = MAX_DATA_POINTS -(seconds - start_idx);
+    if (last_idx >= MAX_DATA_POINTS) last_idx = last_idx - MAX_DATA_POINTS;
+
     unsigned long long *data = cban_get_data_by_type(stat, type);
     TRACE("Type: %d [%d] Last: %llu\n", type, last_idx, data[last_idx]);
     return data[last_idx];
 }
 
-void cban_save_current(struct statistics *stat)
-{
-    stat->last_incoming = stat->incoming;
-    stat->last_outgoing = stat->outgoing;
-}
-
-unsigned long long cban_compute_delta_2(unsigned long long last, unsigned long long current, int seconds)
+unsigned long long cban_compute_delta(unsigned long long last, unsigned long long current, int seconds)
 {
     unsigned long long delta;
 
@@ -186,28 +178,20 @@ unsigned long long cban_compute_delta_interval(struct statistics *stat, int seco
     last = cban_get_last(stat, seconds, type);
     TRACE("Type: %d Last: %llu Current: %llu\n", type, last, current);
 
-    return cban_compute_delta_2(last, current, seconds);
+    return cban_compute_delta(last, current, seconds);
 }
 
-void cban_compute_delta(struct statistics *stat)
+void cban_print_header()
 {
-    if (stat->incoming < stat->last_incoming)
-        stat->delta_incoming = 0;
-    else
-        stat->delta_incoming = (stat->incoming - stat->last_incoming) / update * 1000 / 1024;
-
-    if (stat->outgoing < stat->last_outgoing)
-        stat->delta_outgoing = 0;
-    else
-        stat->delta_outgoing = (stat->outgoing - stat->last_outgoing) / update * 1000 / 1024;
+    printf("%-10s%21s%21s\n", "Inteface", "Incoming", "Outgoing");
 }
 
-void cban_print(char *ifname, unsigned long long incoming, unsigned long long outgoing, int seconds)
+void cban_print(char *ifname, unsigned long long incoming, unsigned long long outgoing)
 {
-    printf( "%s: incoming %s%s/ %d sec: %llu outgoing %s%s/ %d sec: %llu                \n",
-            ifname,
-            kilo, units, seconds, incoming*bits/divisor,
-            kilo, units, seconds, outgoing*bits/divisor );
+    printf("%-10s%15llu %-1s%-5s/s%15llu %-1s%-5s/s\n",
+	   ifname,
+	   incoming*bits/divisor, kilo, units,
+	   outgoing*bits/divisor, kilo, units);
 }
 
 void cban_init_interfaces() 
@@ -215,7 +199,7 @@ void cban_init_interfaces()
     int i;
     for (i = 0; i < MAX_INTERFACES; i++) {
 	struct statistics *stat = &interfaces[i];
-	stat->data_counter = -1;
+	stat->data_counter = 0;
 	stat->processed = 0;
 	memset(stat->incoming_list, 0, MAX_DATA_POINTS);
 	memset(stat->outgoing_list, 0, MAX_DATA_POINTS);
@@ -244,12 +228,13 @@ int parse_proc_net_dev(void)
         struct statistics *stat = &interfaces[intf_idx];
         stat->processed = 0;
 
-        ret = sscanf(current, "%[^:]: %llu %*u %*u %*u %*u %*u %*u %*u %llu %*u",
-                     stat->ifname, &incoming, &outgoing);
+	ret = sscanf(current, "%s %llu %*u %*u %*u %*u %*u %*u %*u %llu %*u",
+		     stat->ifname, &incoming, &outgoing);
 
+	stat->ifname[strlen(stat->ifname) - 1] = '\0'; //remove the : at the end
 
         if (ret < 3)
-            printf("Not all params converted %d for interface %s!\n", ret, stat->ifname);
+	    fprintf(stderr, "Not all params converted %d for interface %s!\n", ret, stat->ifname);
         else
             stat->processed = 1;
 
@@ -262,7 +247,7 @@ int parse_proc_net_dev(void)
     }
 
     fclose(f);
-    DEBUG("closed %s at %p.\n", PROCFILE, f);
+    TRACE("*closed %s at %p.\n", PROCFILE, f);
     return 1;
 }
 
@@ -292,7 +277,7 @@ void monitor_interface()
     if (output_format > RRDTOOL) {
         if (output_format == CONSOLE_CLEAR) {
             printf("%cc",27);              // reset terminal
-            printf("%c[2J",27);            // clear screeen
+            printf("%c[2J",27);            // clear screeen	    
         }
 
 /*
@@ -302,21 +287,28 @@ void monitor_interface()
             cban_save_current(stat);
         }
 */
+	cban_print_header();
+
         while(1) {
             sleep(update);
             parse_proc_net_dev();
 
-            if (output_format == CONSOLE_CLEAR)
+	    if (output_format == CONSOLE_CLEAR) {
                 printf("%c[H",27); // use escape to put the cursor up
+		cban_print_header();
+	    }
 
-            for(i = 0; i < MAX_INTERFACES; i++) {
+            for(i = 0; i < MAX_INTERFACES; i++) {		
                 struct statistics *stat = &interfaces[i];
                 if (!stat->processed) {
                     continue;
                 }
-                incoming = cban_compute_delta_interval(stat, 1, INCOMING);
-		outgoing = cban_compute_delta_interval(stat, 1, OUTGOING);
-                cban_print(stat->ifname, incoming, outgoing, 1);
+		TRACE("Filter interface: %s current %s\n", interface, stat->ifname);
+		if (interface == NULL || (interface != NULL && strncmp(interface, stat->ifname, strlen(interface)) == 0)) {
+		    incoming = cban_compute_delta_interval(stat, 2, INCOMING);
+		    outgoing = cban_compute_delta_interval(stat, 2, OUTGOING);
+		    cban_print(stat->ifname, incoming, outgoing);
+		}
             }
         }
     }
@@ -361,7 +353,7 @@ int main ( int argc, char *argv[] )
             break;
         case 'k':
             divisor = 1024;
-            kilo = "kilo";
+	    kilo = "K";
             break;
         case 'i':
             interface = strdup (optarg);

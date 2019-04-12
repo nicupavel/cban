@@ -37,10 +37,9 @@
 
 char *interface = NULL;
 char *units="bytes";
-char *kilo="";
 char *rrd_filename;
 
-static int update,debug=0,bits=1,divisor=1;
+static int update = 1, debug=0, bits=1, avg = 2, scale = 0;
 typedef enum {MRTG, RRDTOOL, CONSOLE_CLEAR, PLAIN} output_format_t;
 static output_format_t output_format = PLAIN;
 typedef enum {INCOMING, OUTGOING } data_type_t;
@@ -68,9 +67,9 @@ void help ()
     printf ("\t-r <rrd_filename> : output in a suitable form for RRDTOOL.\n");
     printf ("\t-d : debug level 0 - none 1 - verbose 2 - nearly everything \n\t- default 0.\n");
     printf ("\t-i <interface> : output only this interface\n");
-    printf ("\t-u <update interval>: specifies (in seconds) the delay between updates - default 1s.\n");
+    printf ("\t-a <average range>: Average over this period in seconds. Max %d.\n", MAX_DATA_POINTS);
     printf ("\t-b : print statistics in bits rather then in bytes.\n");
-    printf ("\t-k : print statistics in kilo.\n");
+    printf ("\t-s : auto prefix (K, M, G)\n");
 }
 
 int open_proc_file ()
@@ -165,7 +164,7 @@ unsigned long long cban_compute_delta(unsigned long long last, unsigned long lon
     if (current < last)
         delta = 0;
     else
-        delta = (current - last) / seconds / update * 1000 / 1024;
+	delta = (current - last) / seconds;
 
     return delta;
 }
@@ -173,6 +172,8 @@ unsigned long long cban_compute_delta(unsigned long long last, unsigned long lon
 unsigned long long cban_compute_delta_interval(struct statistics *stat, int seconds, data_type_t type)
 {
     unsigned long long last, current;
+
+    if (seconds > stat->data_counter) seconds = stat->data_counter; //Not enough data use the closest point
 
     current = cban_get_current(stat, type);
     last = cban_get_last(stat, seconds, type);
@@ -188,10 +189,28 @@ void cban_print_header()
 
 void cban_print(char *ifname, unsigned long long incoming, unsigned long long outgoing)
 {
-    printf("%-10s%15llu %-1s%-5s/s%15llu %-1s%-5s/s\n",
+    int idiv = 0, odiv = 0;
+    int m = 1024;
+    char *prefix_names[] = {"", "K", "M", "G" };
+
+    double itmp = incoming * bits;
+    double otmp = outgoing * bits;
+
+    if (scale) {
+	while(itmp/m >= 1 && idiv < 4) {
+	    itmp /= m;
+	    idiv++;
+	}
+	while(otmp/m >= 1 && odiv < 4) {
+	    otmp /= m;
+	    odiv++;
+	}
+    }
+
+    printf("%-10s%13.2f %-1s%-5s/s%13.2f %-1s%-5s/s\n",
 	   ifname,
-	   incoming*bits/divisor, kilo, units,
-	   outgoing*bits/divisor, kilo, units);
+	   itmp, prefix_names[idiv], units,
+	   otmp, prefix_names[odiv], units);
 }
 
 void cban_init_interfaces() 
@@ -257,11 +276,11 @@ void monitor_interface()
     unsigned long long  incoming, outgoing;
 
     // if we are using format for rrdtool
-    // we must do this before everithig starts
+    // we must do this before everythig starts
     // so in a case of error we fail ok.
     // (we are piped with rrdtool)
     if (output_format == RRDTOOL) {
-        printf ("update %s N:", rrd_filename);
+	printf ("update %s N:", rrd_filename);
     }
 
     // initial state
@@ -280,13 +299,6 @@ void monitor_interface()
             printf("%c[2J",27);            // clear screeen	    
         }
 
-/*
-        for(i = 0; i < MAX_INTERFACES; i++) {
-            struct statistics *stat = &interfaces[i];
-            if (!stat->processed) continue;
-            cban_save_current(stat);
-        }
-*/
 	cban_print_header();
 
         while(1) {
@@ -305,27 +317,29 @@ void monitor_interface()
                 }
 		TRACE("Filter interface: %s current %s\n", interface, stat->ifname);
 		if (interface == NULL || (interface != NULL && strncmp(interface, stat->ifname, strlen(interface)) == 0)) {
-		    incoming = cban_compute_delta_interval(stat, 2, INCOMING);
-		    outgoing = cban_compute_delta_interval(stat, 2, OUTGOING);
+		    incoming = cban_compute_delta_interval(stat, avg, INCOMING);
+		    outgoing = cban_compute_delta_interval(stat, avg, OUTGOING);
 		    cban_print(stat->ifname, incoming, outgoing);
 		}
             }
         }
-    }
-    // just output one set of values for mrtg or rrdtool.
-    // rrdtool use total number of bytes in/out.
+    }    
     else {
-        if (output_format == RRDTOOL) {
-//		printf( "%llu:%llu\n",
-//		previous.incoming*bits/divisor,
-//		previous.outgoing*bits/divisor );
-        } else {
-//		sleep(update);
-//		parse_proc_net_dev();
-//		incoming = (current.incoming - previous.incoming) / update * 1000 / 1024;
-//		outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
-//		printf( "%llu\n%llu\n", incoming*bits/divisor, outgoing*bits/divisor );
-        }
+	// just output one set of values for mrtg or rrdtool.
+	// rrdtool use total number of bytes in/out.
+	if (interface != NULL) {
+	    if (output_format == RRDTOOL) {
+		    printf( "%llu:%llu\n",
+		    bits,
+		    bits );
+	    } else {
+    //		sleep(update);
+    //		parse_proc_net_dev();
+    //		incoming = (current.incoming - previous.incoming) / update * 1000 / 1024;
+    //		outgoing = (current.outgoing - previous.outgoing) / update * 1000 / 1024;
+    //		printf( "%llu\n%llu\n", incoming*bits/divisor, outgoing*bits/divisor );
+	    }
+	}
     }
 }
 
@@ -334,8 +348,14 @@ int main ( int argc, char *argv[] )
 {
     int option;
 
-    while (( option = getopt ( argc, argv, "hbkcd:i:u:mr:")) != -1 ) {
+    while (( option = getopt ( argc, argv, "hbscd:i:a:mr:")) != -1 ) {
         switch (option) {
+	case 'a':
+	    avg = atoi(optarg);
+	    if (avg < 2) avg = 2;
+	    if (avg > MAX_DATA_POINTS) avg = MAX_DATA_POINTS;
+	    DEBUG("Averaging over a period of %d seconds\n", avg);
+	    break;
         case 'h':
             help();
             return 0;
@@ -343,17 +363,12 @@ int main ( int argc, char *argv[] )
             debug = atoi (optarg);
             DEBUG("debug level: %d\n",debug);
             break;
-        case 'u':
-            update = atoi (optarg);
-            DEBUG("Updating every %d seconds.\n",update);
-            break;
         case 'b':
             bits = 8;
             units = "bits";
             break;
-        case 'k':
-            divisor = 1024;
-	    kilo = "K";
+	case 's':
+	    scale = 1;
             break;
         case 'i':
             interface = strdup (optarg);
@@ -372,6 +387,7 @@ int main ( int argc, char *argv[] )
             debug = 0;
         }
     }
+
     if (output_format == RRDTOOL) {
         if (!rrd_filename) {
             fprintf(stderr, "error: you must specify what file to update when using rrdtool option.\n");
@@ -383,10 +399,6 @@ int main ( int argc, char *argv[] )
             return 3;
         }
 
-    }
-    if ( !update ) {
-        DEBUG("warning: using default update interval at %d seconds.\n",UPDATE_INTERVAL);
-        update = UPDATE_INTERVAL;
     }
 
     cban_init_interfaces();

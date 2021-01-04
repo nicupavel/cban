@@ -14,6 +14,10 @@ To install just type make in the src directory.After that you can do a make inst
 	-u <update interval>: specifies (in seconds) the delay between updates.
 	-b : print statistics in bits rather then in bytes.
 	-k : print statistics in kilo.
+	
+## Multiple interfaces
+
+For multiple interface support build the project from using *feature-multi-ifaces* branch.
 
 ## USING cban WITH RRDTOOL
 
